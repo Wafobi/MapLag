@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>MapLag — Hide & Seek Map</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <div class="logo">MAPLAG</div>
+    <div class="sep"></div>
+    <div class="tb-group">
+      <button class="tb-btn" data-mode="circ"><span class="tb-icon">◎</span><span class="tb-lbl">Radar</span></button>
+      <button class="tb-btn" id="btn-thermo"><span class="tb-icon">🌡</span><span class="tb-lbl">Thermo</span></button>
+      <button class="tb-btn" id="btn-mq"><span class="tb-icon">📏</span><span class="tb-lbl" data-t="tb.mq">Messfrage</span></button>
+      <button class="tb-btn" id="btn-admin"><span class="tb-icon">◰</span><span class="tb-lbl" data-t="tb.area">Gebiet</span></button>
+    </div>
+    <div class="sep"></div>
+    <button class="tb-btn" id="btn-locate" title="Auf meinen Standort zentrieren" data-tt="title.locate"><span class="tb-icon">⊕</span><span class="tb-lbl" data-t="tb.locate">Orten</span></button>
+    <div id="search-wrap">
+      <button id="search-toggle">🔍</button>
+      <div id="search-bar">
+        <div style="position:relative">
+          <span id="search-icon">🔍</span>
+          <input type="text" id="search-input" placeholder="Ort suchen …" autocomplete="off" data-tp="search.ph">
+        </div>
+        <div id="search-results"></div>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <span id="uid-label" style="font-size:10px;color:var(--text3);letter-spacing:.3px;cursor:pointer" title="User ID"></span>
+    <div class="sep"></div>
+    <button class="tb-btn" id="btn-lang-ui" style="font-weight:700;letter-spacing:.5px"><span class="tb-lbl">DE</span></button>
+    <button class="tb-btn" id="btn-theme"><span class="tb-icon">☀</span><span class="tb-lbl">Hell</span></button>
+  </div>
+  <div id="main">
+    <div id="map">
+      <div id="tip"></div>
+      <div id="radius-popup" style="display:none"></div>
+      <button id="btn-zones" style="position:absolute;top:10px;right:10px;z-index:9500;background:var(--bg1);color:var(--text1);border:1px solid var(--border2);border-radius:var(--r8);padding:6px 12px;font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:6px;box-shadow:0 2px 8px #0006">📋 <span id="zp-count">0</span></button>
+    </div>
+  </div>
+</div>
+
+
+<!-- RADAR SHEET -->
+<div id="radar-sheet" class="bottom-sheet">
+  <div class="sheet-box">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <h3>◎ Radar</h3>
+      <button class="sheet-close" id="btn-radar-close">×</button>
+    </div>
+    <div class="sheet-body">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px" data-t="radar.hint">Radius eingeben, dann Hit oder Miss drücken. Ohne GPS: zuerst auf die Karte tippen.</div>
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <input type="number" id="radius-km" min="0.1" max="500" step="0.1" value="5" class="sh-input" style="flex:1">
+        <span id="radius-unit-label" style="font-size:13px;color:var(--text2)">km</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button id="btn-ok-hit" class="sh-btn hit" style="flex:1">✓ Hit</button>
+        <button id="btn-ok-miss" class="sh-btn miss" style="flex:1">✗ Miss</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MEASURING QUESTION SHEET -->
+<div id="mq-sheet" class="bottom-sheet">
+  <div class="sheet-box">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <h3 data-t="mq.title" data-t-pre="📏 ">📏 Messfrage</h3>
+      <button class="sheet-close" id="btn-mq-close">×</button>
+    </div>
+    <div class="sheet-body">
+      <div style="font-size:12px;color:var(--text2);margin-bottom:12px" data-t="mq.hint">Ort suchen oder Karte antippen um Vergleichspunkt zu setzen. Ohne GPS: zuerst eigene Position antippen.</div>
+      <div id="mq-selected" style="display:none;background:var(--bg);border:1px solid var(--border);border-radius:var(--r6);padding:8px 10px;margin-bottom:12px">
+        <div id="mq-selected-name" style="font-size:13px;font-weight:600;color:var(--gold);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></div>
+        <div id="mq-selected-dist" style="font-size:11px;color:var(--text2);margin-top:2px"></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button id="btn-mq-closer" class="sh-btn hit" style="flex:1;opacity:0.4" data-t="mq.closer">✓ Näher</button>
+        <button id="btn-mq-further" class="sh-btn miss" style="flex:1;opacity:0.4" data-t="mq.further">✗ Weiter</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- THERMOMETER SHEET -->
+<div id="thermo-panel" class="bottom-sheet">
+  <div class="sheet-box">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <h3>🌡 Thermometer</h3>
+      <button class="sheet-close" id="btn-thermo-close">×</button>
+    </div>
+    <div class="sheet-body">
+      <div id="tp-step-start">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:14px;line-height:1.7" data-th="tp.hint"><b style="color:var(--text1)">Start</b> am ersten Standort drücken, dann zum zweiten Punkt gehen und <b style="color:var(--text1)">Stop</b> drücken. Ohne GPS auf die Karte tippen.</div>
+        <button id="btn-tp-start" class="sh-btn hit" data-t="tp.start">📍 Start</button>
+        <div id="tp-start-info" style="display:none;margin-top:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r6);padding:10px 12px;font-size:12px;color:var(--text2)"><span style="color:var(--green)">● Start:</span> <span id="tp-start-coords"></span></div>
+      </div>
+      <div id="tp-step-stop" style="display:none;margin-top:12px">
+        <div id="tp-start-info2" style="margin-bottom:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r6);padding:10px 12px;font-size:12px;color:var(--text2)"><span style="color:var(--green)">● Start:</span> <span id="tp-start-coords2"></span></div>
+        <button id="btn-tp-stop" class="sh-btn" style="border-color:#e8b84b;color:#e8b84b;background:rgba(232,184,75,.1)" data-t="tp.stop">🛑 Stop</button>
+        <div id="tp-stop-info" style="display:none;margin-top:10px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r6);padding:10px 12px;font-size:12px;color:var(--text2)"><span style="color:var(--gold)">● Stop:</span> <span id="tp-stop-coords"></span><br><span id="tp-dist-info" style="color:var(--text1);font-size:13px;font-weight:600"></span></div>
+      </div>
+      <div id="tp-step-answer" style="display:none;margin-top:14px">
+        <div style="font-size:13px;color:var(--text2);margin-bottom:12px;line-height:1.6" data-th="tp.question">Ist der Hider <b style="color:var(--red)">wärmer</b> (näher) oder <b style="color:#5ba3e0">kälter</b> (weiter) geworden?</div>
+        <div style="display:flex;gap:8px">
+          <button id="btn-tp-warmer" class="sh-btn miss" style="flex:1" data-t="tp.warmer">🔥 Warmer</button>
+          <button id="btn-tp-cooler" class="sh-btn" style="flex:1;border-color:#5ba3e0;color:#5ba3e0;background:rgba(91,163,224,.1)" data-t="tp.cooler">❄️ Cooler</button>
+        </div>
+      </div>
+      <div class="tp-log" id="tp-log" style="margin-top:12px"></div>
+      <div id="tp-zone-info" style="display:none;margin-top:8px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r6);padding:8px 12px;font-size:11px;color:var(--text2)" data-t="tp.zoneinfo">Karte aktualisiert</div>
+      <button id="btn-tp-reset" class="sh-btn ghost" style="margin-top:8px" data-t="tp.reset">↺ Zurücksetzen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ZONES SHEET -->
+<div id="zone-panel" class="bottom-sheet">
+  <div class="sheet-box">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <h3>Zones (<span id="zp-count2">0</span>)</h3>
+      <button class="sheet-close" id="zone-panel-close">×</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 18px 10px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span style="font-size:11px;color:var(--text2);flex-shrink:0" data-t="zone.misscolor">Miss-Farbe:</span>
+      <input type="color" id="miss-color-picker" style="width:32px;height:32px;border:none;border-radius:50%;padding:0;cursor:pointer;background:none">
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 18px 10px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span id="pattern-label" style="font-size:11px;color:var(--text2);flex-shrink:0" data-t="pattern.label">Muster:</span>
+      <button id="btn-pattern-off"     class="sh-btn" style="flex:1;font-size:13px;padding:4px 0" data-t="pattern.off">✕ Aus</button>
+      <button id="btn-pattern-stripes" class="sh-btn" style="flex:1;font-size:13px;padding:4px 0" data-t="pattern.stripes">≡ Striche</button>
+      <button id="btn-pattern-zigzag"  class="sh-btn" style="flex:1;font-size:13px;padding:4px 0" data-t="pattern.zigzag">⌇ Zickzack</button>
+    </div>
+    <div id="pattern-settings" style="display:flex;flex-direction:column;gap:8px;padding:8px 18px 10px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="pattern-size-label" style="font-size:11px;color:var(--text2);width:70px;flex-shrink:0" data-t="pattern.size">Größe</span>
+        <input type="range" id="pattern-size" min="1" max="12" step="0.5" style="flex:1;accent-color:var(--gold)">
+        <span id="pattern-size-lbl" style="font-size:11px;color:var(--text2);width:24px;text-align:right"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <span id="pattern-speed-label" style="font-size:11px;color:var(--text2);width:70px;flex-shrink:0" data-t="pattern.speed">Geschw.</span>
+        <input type="range" id="pattern-speed" min="1" max="10" step="0.5" style="flex:1;accent-color:var(--gold)">
+        <span id="pattern-speed-lbl" style="font-size:11px;color:var(--text2);width:24px;text-align:right"></span>
+      </div>
+    </div>
+    <div id="zone-panel-list" class="sheet-body"></div>
+  </div>
+</div>
+
+<!-- ADMIN AREA SHEET -->
+<div id="admin-sheet" class="bottom-sheet">
+  <div class="sheet-box">
+    <div class="sheet-handle"></div>
+    <div class="sheet-header">
+      <h3>◰ Area Zones</h3>
+      <button class="sheet-close" id="btn-admin-close">×</button>
+    </div>
+    <div class="sheet-body">
+      <div id="admin-level-select">
+        <span class="sh-label" data-t="admin.hint">Admin-Ebene wählen, dann Karte antippen</span>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px">
+          <button class="sh-btn" data-admin-zoom="4" data-t="admin.country" data-t-pre="🌍 ">🌍 Land</button>
+          <button class="sh-btn" data-admin-zoom="5" data-t="admin.state" data-t-pre="🏛 ">🏛 Bundesland</button>
+          <button class="sh-btn" data-admin-zoom="8" data-t="admin.district" data-t-pre="🏘 ">🏘 Landkreis</button>
+          <button class="sh-btn" data-admin-zoom="10" data-t="admin.city" data-t-pre="🏙 ">🏙 Stadt</button>
+        </div>
+        <div id="admin-loading" style="display:none;font-size:12px;color:var(--text2);text-align:center;padding:8px" data-t="admin.loading">Grenze wird geladen…</div>
+      </div>
+      <div id="admin-confirm" style="display:none">
+        <div id="admin-name" style="font-size:14px;font-weight:600;color:var(--gold);margin-bottom:14px;line-height:1.5"></div>
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <button id="btn-admin-hit" class="sh-btn hit" style="flex:1" data-t="admin.hit">✓ Hit — Hier</button>
+          <button id="btn-admin-miss" class="sh-btn miss" style="flex:1" data-t="admin.miss">✗ Miss — Nicht hier</button>
+        </div>
+        <button id="btn-admin-reselect" class="sh-btn ghost" data-t="admin.reselect">↩ Neu wählen</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="pw-modal" style="display:flex;position:fixed;inset:0;background:var(--bg);z-index:99999;align-items:center;justify-content:center">
+  <div style="background:var(--bg2);border:1px solid var(--border2);border-radius:var(--r14);padding:28px 24px;width:min(320px,92vw);box-shadow:0 16px 48px rgba(0,0,0,.7)">
+    <div style="font-size:18px;font-weight:700;color:var(--gold);margin-bottom:6px">🔒 MapLag</div>
+    <div id="pw-hint" style="font-size:12px;color:var(--text2);margin-bottom:18px" data-t="pw.hint">Gruppenpasswort eingeben um beizutreten</div>
+    <input type="password" id="pw-input" placeholder="Passwort…" autocomplete="off" data-tp="pw.passwordph"
+      style="width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r6);color:var(--text1);font-size:14px;padding:10px 12px;outline:none;box-sizing:border-box;margin-bottom:6px">
+    <div id="pw-error" style="display:none;font-size:11px;color:var(--red);margin-bottom:10px" data-t="pw.error">Falsches Passwort</div>
+    <div id="pw-role" style="margin-bottom:14px">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:8px;text-transform:uppercase;letter-spacing:1px" data-t="role.title">Rolle wählen</div>
+      <div style="display:flex;gap:8px">
+        <button type="button" id="pw-role-hider" class="sh-btn" style="flex:1;padding:10px 8px" data-role="hider">
+          <div style="font-size:18px">🙈</div>
+          <div style="font-size:13px;font-weight:600">Hider</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px" data-t="role.hider.desc">Versteckt sich — sieht Positionen der Seeker</div>
+        </button>
+        <button type="button" id="pw-role-seeker" class="sh-btn sel" style="flex:1;padding:10px 8px" data-role="seeker">
+          <div style="font-size:18px">🔍</div>
+          <div style="font-size:13px;font-weight:600">Seeker</div>
+          <div style="font-size:10px;color:var(--text2);margin-top:2px" data-t="role.seeker.desc">Sucht — nutzt Radar, Thermo, Messfrage, Gebiet</div>
+        </button>
+      </div>
+    </div>
+    <button id="pw-submit" class="sh-btn hit" style="width:100%" data-t="pw.submit">Beitreten</button>
+  </div>
+</div>
+
+<div id="label-modal">
+  <div id="label-box">
+    <h3 data-t="label.title">Zone benennen</h3>
+    <input type="text" id="label-input" placeholder="z. B. Verbotene Zone Nord" maxlength="40" data-tp="label.ph">
+    <div class="modal-btns">
+      <button id="btn-lbl-cancel" class="sh-btn ghost" style="flex:1" data-t="label.cancel">Abbrechen</button>
+      <button id="btn-lbl-ok" class="sh-btn hit" style="flex:1">OK</button>
+    </div>
+  </div>
+</div>
+
+
+<div id="confirm-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;align-items:center;justify-content:center">
+  <div class="confirm-modal">
+    <p id="confirm-msg" style="font-size:13px;color:#c9d1d9;margin-bottom:16px;line-height:1.5"></p>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button id="btn-confirm-cancel" class="sh-btn ghost" data-t="confirm.cancel">Abbrechen</button>
+      <button id="btn-confirm-ok" class="sh-btn miss" data-t="confirm.ok">Löschen</button>
+    </div>
+  </div>
+</div>
+
+
+
+<svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;top:0;left:0;width:1px;height:1px;overflow:hidden;pointer-events:none" aria-hidden="true" focusable="false">
+  <defs>
+    <pattern id="_elim_dots" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect id="_pb_dots" width="12" height="12" fill-opacity="0.3"/>
+      <line id="_pd1" x1="0" y1="2"  x2="12" y2="2"  stroke-width="5" opacity=".6"/>
+      <line id="_pd2" x1="0" y1="6"  x2="12" y2="6"  stroke-width="5" opacity=".6"/>
+      <line id="_pd3" x1="0" y1="10" x2="12" y2="10" stroke-width="5" opacity=".6"/>
+      <animateTransform attributeName="patternTransform" type="translate"
+        from="0 0" to="0 12" dur="1.5s" repeatCount="indefinite" additive="sum"/>
+    </pattern>
+    <pattern id="_elim_zz" width="20" height="18" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect id="_pb_zz" width="20" height="18" fill-opacity="0.3"/>
+      <polyline id="_pz1" points="-10,6 0,0 10,6 20,0 30,6"    fill="none" stroke-width="5" stroke-linejoin="round" stroke-linecap="round" opacity=".6"/>
+      <polyline id="_pz2" points="-10,12 0,6 10,12 20,6 30,12"  fill="none" stroke-width="5" stroke-linejoin="round" stroke-linecap="round" opacity=".6"/>
+      <polyline id="_pz3" points="-10,18 0,12 10,18 20,12 30,18" fill="none" stroke-width="5" stroke-linejoin="round" stroke-linecap="round" opacity=".6"/>
+      <animateTransform attributeName="patternTransform" type="translate"
+        from="0 0" to="0 18" dur="1.5s" repeatCount="indefinite" additive="sum"/>
+    </pattern>
+  </defs>
+</svg>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
