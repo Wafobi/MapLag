@@ -38,7 +38,8 @@ function fakeGeolocation() {
 
 export const settle = (ms = 350) => new Promise(r => setTimeout(r, ms));
 
-export async function boot({ url = 'http://localhost/index.html', local = {}, session = {}, fetch } = {}) {
+// firebase: false simulates the SDK failing to load (app opened offline)
+export async function boot({ url = 'http://localhost/index.html', local = {}, session = {}, fetch, firebase: withFirebase = true } = {}) {
   // Drop the CDN <script> tags; dependencies are provided from node_modules
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8')
     .replace(/<script\b[\s\S]*?<\/script>/g, '');
@@ -64,7 +65,8 @@ export async function boot({ url = 'http://localhost/index.html', local = {}, se
   globalThis.L = require('leaflet');
   globalThis.turf = require('@turf/turf');
   const firebase = createFakeFirebase();
-  globalThis.firebase = firebase;
+  if (withFirebase) globalThis.firebase = firebase;
+  else delete globalThis.firebase;
 
   await import('../js/main.js');
   const mod = name => import(`../js/${name}.js`);

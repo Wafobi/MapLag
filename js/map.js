@@ -22,15 +22,16 @@ L.control.zoom({ position: 'topleft' }).addTo(map);
 // ── Tile providers ─────────────────────────────────────────
 
 const _ca = '&copy; CARTO &copy; OpenStreetMap';
-const _co = { subdomains: 'abcd', maxZoom: 20 };
+// crossOrigin: tiles load via CORS so the service worker can keep them for offline use
+const _co = { subdomains: 'abcd', maxZoom: 20, crossOrigin: true };
 const _tp = (url, opts) => [{ url, opts }];
 
 const tileProvidersDark = _tp('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { ..._co, attribution: _ca, className: 'tiles-dark' });
 const tileProvidersLight = _tp('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { ..._co, attribution: _ca });
-const tileProvidersDefault = _tp('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap', subdomains: 'abc', maxZoom: 19 });
-const tileProvidersSatellite = _tp('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: '&copy; Esri &copy; USGS &copy; USDA', maxZoom: 19 });
+const tileProvidersDefault = _tp('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap', subdomains: 'abc', maxZoom: 19, crossOrigin: true });
+const tileProvidersSatellite = _tp('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: '&copy; Esri &copy; USGS &copy; USDA', maxZoom: 19, crossOrigin: true });
 const tileProvidersLang = {
-  de: _tp('https://tile.openstreetmap.de/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap DE', maxZoom: 19 }),
+  de: _tp('https://tile.openstreetmap.de/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap DE', maxZoom: 19, crossOrigin: true }),
   en: _tp('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', { ..._co, attribution: _ca }),
 };
 
@@ -43,7 +44,7 @@ export const mapThemeStates = [
   { key: 'satellite', providers: tileProvidersSatellite, icon: '🛰', lbl: 'Satellit', noLang: true },
   { key: 'hybrid',    providers: tileProvidersSatellite, icon: '🌍', lbl: 'Hybrid', noLang: true,
     labelUrl: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png',
-    labelOpts: { attribution: '', subdomains: 'abcd', maxZoom: 20, opacity: 0.9 }
+    labelOpts: { attribution: '', subdomains: 'abcd', maxZoom: 20, opacity: 0.9, crossOrigin: true }
   },
 ];
 
@@ -69,11 +70,13 @@ export function loadTiles(idx) {
   if (currentTile) map.removeLayer(currentTile);
   const p = providers[idx];
   currentTile = L.tileLayer(p.url, p.opts).addTo(map);
-  // Fall back to the next provider only after 3 errors in a row,
-  // not after 3 sporadic failures over the whole session
-  let errorCount = 0;
-  currentTile.on('tileload', () => { errorCount = 0; });
+  // Fall back to the next provider only if this one never delivered a tile.
+  // Once it worked, errors mean we are offline: switching would only lose
+  // the tiles cached for this provider.
+  let errorCount = 0, worked = false;
+  currentTile.on('tileload', () => { worked = true; });
   currentTile.on('tileerror', function () {
+    if (worked) return;
     errorCount++;
     if (errorCount >= 3) { errorCount = 0; loadTiles(idx + 1); }
   });

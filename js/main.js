@@ -104,6 +104,11 @@ uidEl.addEventListener('click', () => {
 new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById('map'));
 tip(T.start, 4000);
 
+// ── Offline support (map tiles + app files) ───────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(e => console.warn('Service worker:', e));
+}
+
 // ── Cleanup ───────────────────────────────────────────────
 window.addEventListener('beforeunload', () => {
   if (locationWatch) navigator.geolocation.clearWatch(locationWatch);

@@ -1,10 +1,12 @@
 // ── Firebase sync + encryption ─────────────────────────────
 
-import { st, tp, zoneOrderAdd, zoneHistory, thermoHistory, role, setRole, _devId } from './state.js';
+import { st, tp, zoneOrderAdd, zoneHistory, thermoHistory, role, setRole, _devId, tip } from './state.js';
 import { map } from './map.js';
 import { deserializeZone, renderList } from './zones.js';
 import { tpDrawBisector } from './thermo.js';
 import { bridge } from './bridge.js';
+import { t } from './i18n.js';
+import { RoomMirror } from './offline.js';
 
 // ── Config ─────────────────────────────────────────────────
 
@@ -32,6 +34,11 @@ export let fbDb = null;
 export let fbReady = null;  // resolves once the key is derived and listeners are attached
 let fbPwHash = null;
 let _cryptoKey = null;
+
+// Set once the player joined: 'online' (Firebase + local mirror) or 'solo' (local only)
+export let playMode = null;
+let _mirror = null;
+let _connected = true;  // optimistic until Firebase reports otherwise
 
 function _pwHash(str) {
   let h = 0x811c9dc5;
@@ -89,14 +96,22 @@ async function fbDecrypt(wrapper) {
 }
 
 // ── CRUD ───────────────────────────────────────────────────
+// Writes go to the local mirror first (cache + outbox), then to Firebase.
+// The outbox entry is dropped once Firebase confirms the write; until then
+// it survives reloads and is re-sent on the next start.
 
 const _writeTimers = {};
 const _writeTokens = {};
 const WRITE_DEBOUNCE = 150;
 
+function _commit(rel, value) {
+  const ack = _mirror.write(rel, value);
+  if (fbDb) fbDb.ref(`${fbRoomPath()}/${rel}`).set(value).then(ack, e => console.warn('Firebase write failed:', rel, e));
+}
+
 // Debounced encrypted write. The token is claimed before encrypting, so a
 // delete (or newer write) issued while encryption is in flight wins.
-async function _queueWrite(key, path, data) {
+async function _queueWrite(key, rel, data) {
   const token = Symbol(key);
   _writeTokens[key] = token;
   clearTimeout(_writeTimers[key]);
@@ -105,7 +120,7 @@ async function _queueWrite(key, path, data) {
   _writeTimers[key] = setTimeout(() => {
     delete _writeTimers[key];
     delete _writeTokens[key];
-    fbDb.ref(path).set(encrypted);
+    _commit(rel, encrypted);
   }, WRITE_DEBOUNCE);
 }
 
@@ -116,36 +131,26 @@ function _cancelWrite(key) {
 }
 
 export function fbWriteZone(id, zoneData) {
-  if (!fbDb) return;
-  return _queueWrite('z_' + id, `${fbRoomPath()}/zones/${id}`, zoneData);
+  if (!_mirror) return;
+  return _queueWrite('z_' + id, `zones/${id}`, zoneData);
 }
 
 export function fbDeleteZone(id) {
-  if (!fbDb) return;
+  if (!_mirror) return;
   _cancelWrite('z_' + id);
-  fbDb.ref(`${fbRoomPath()}/zones/${id}/deleted`).set(true);
-}
-
-export function fbClearZones() {
-  if (!fbDb) return;
-  fbDb.ref(`${fbRoomPath()}/zones`).remove();
+  _commit(`zones/${id}/deleted`, true);
 }
 
 export function fbWriteThermo(c) {
-  if (!fbDb) return;
+  if (!_mirror) return;
   const { id, startPos, stopPos, warmer } = c;
-  return _queueWrite('t_' + id, `${fbRoomPath()}/thermos/${id}`, { id, startPos, stopPos, warmer });
+  return _queueWrite('t_' + id, `thermos/${id}`, { id, startPos, stopPos, warmer });
 }
 
 export function fbDeleteThermo(id) {
-  if (!fbDb) return;
+  if (!_mirror) return;
   _cancelWrite('t_' + id);
-  fbDb.ref(`${fbRoomPath()}/thermos/${id}/deleted`).set(true);
-}
-
-export function fbClearThermos() {
-  if (!fbDb) return;
-  fbDb.ref(`${fbRoomPath()}/thermos`).remove();
+  _commit(`thermos/${id}/deleted`, true);
 }
 
 // ── Firebase listeners ─────────────────────────────────────
@@ -265,31 +270,96 @@ function fbListen() {
   // Hiders don't receive zone/thermo data — only seeker locations
   if (role === 'hider') { _fbListenLocations(); return; }
 
-  const zonesRef = fbDb.ref(`${fbRoomPath()}/zones`);
-  const thermosRef = fbDb.ref(`${fbRoomPath()}/thermos`);
-
-  zonesRef.on('child_added', async snap => { _fbApplyZone(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); });
-  zonesRef.on('child_changed', async snap => { _fbApplyZone(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); });
-  zonesRef.on('child_removed', snap => { _fbRemoveZone(snap.key); _fbScheduleRender(); });
-
-  thermosRef.on('child_added', async snap => { _fbApplyThermo(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); });
-  thermosRef.on('child_changed', async snap => { _fbApplyThermo(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); });
-  thermosRef.on('child_removed', snap => { _fbRemoveThermo(snap.key); _fbScheduleRender(); });
+  const listen = (kind, apply, remove) => {
+    const ref = fbDb.ref(`${fbRoomPath()}/${kind}`);
+    const upsert = async snap => {
+      _mirror.put(`${kind}/${snap.key}`, snap.val());
+      apply(snap.key, await fbDecrypt(snap.val()));
+      _fbScheduleRender();
+    };
+    ref.on('child_added', upsert);
+    ref.on('child_changed', upsert);
+    ref.on('child_removed', snap => {
+      _mirror.put(`${kind}/${snap.key}`, null);
+      remove(snap.key);
+      _fbScheduleRender();
+    });
+  };
+  listen('zones', _fbApplyZone, _fbRemoveZone);
+  listen('thermos', _fbApplyThermo, _fbRemoveThermo);
 
   _fbListenLocations();
 }
 
+// ── Offline status badge ───────────────────────────────────
+
+function _updateNetStatus() {
+  const el = document.getElementById('net-status');
+  if (!el) return;
+  const n = _mirror ? _mirror.pendingCount() : 0;
+  let txt = '';
+  if (playMode === 'solo') txt = t('net.solo');
+  else if (playMode === 'online' && !_connected) txt = t('net.offline', n);
+  else if (n) txt = t('net.syncing', n);
+  el.textContent = txt;
+  el.style.display = txt ? '' : 'none';
+}
+
+// Firebase reports "disconnected" briefly while connecting and on short
+// hiccups, so only show offline after it persisted for a moment
+let _offlineTimer = null;
+function _watchConnection() {
+  fbDb.ref('.info/connected').on('value', snap => {
+    clearTimeout(_offlineTimer);
+    if (snap.val() === true) { _connected = true; _updateNetStatus(); }
+    else _offlineTimer = setTimeout(() => { _connected = false; _updateNetStatus(); }, 2000);
+  });
+}
+
 // ── Init ───────────────────────────────────────────────────
+
+function _openMirror(roomPath, opts) {
+  _mirror = new RoomMirror(roomPath, opts);
+  _mirror.onchange = _updateNetStatus;
+  _mirror.onerror = () => tip(t('tip.storagefull'), 6000);
+}
+
+// Show what this device last knew about the room, before (or without) the server
+async function _loadMirror() {
+  for (const [kind, apply] of [['zones', _fbApplyZone], ['thermos', _fbApplyThermo]]) {
+    for (const [id, w] of Object.entries(_mirror.children(kind))) apply(id, await fbDecrypt(w));
+  }
+  _fbScheduleRender();
+}
 
 async function fbInit(pwHash, pw) {
   fbPwHash = pwHash;
-  if (!FB_CONFIG.apiKey || FB_CONFIG.apiKey === 'PASTE_API_KEY') return;
   try {
     _cryptoKey = await fbDeriveKey(pw || pwHash, FB_ROOM);
+    playMode = 'online';
+    _openMirror(fbRoomPath());
+    if (role !== 'hider') await _loadMirror();
+    if (typeof firebase === 'undefined') {
+      // SDK not loaded (started offline): keep playing locally, sync next time
+      _connected = false;
+      return;
+    }
     if (!firebase.apps.length) firebase.initializeApp(FB_CONFIG);
     fbDb = firebase.database();
+    // Re-send writes that were never confirmed (e.g. made offline before a reload)
+    _mirror.pending().forEach(p => fbDb.ref(`${fbRoomPath()}/${p.rel}`).set(p.value).then(p.ack, () => {}));
+    _watchConnection();
     fbListen();
   } catch (e) { console.error('Firebase init:', e); }
+  finally { _updateNetStatus(); }
+}
+
+// Solo: no password, no server — zones live only on this device
+async function soloInit() {
+  playMode = 'solo';
+  _openMirror(`solo/${FB_ROOM}`, { withOutbox: false });
+  await _loadMirror();
+  _updateNetStatus();
 }
 
 export function initFirebase() {
@@ -302,11 +372,6 @@ export function initFirebase() {
   // Password modal
   const modal = document.getElementById('pw-modal');
   const input = document.getElementById('pw-input');
-
-  if (!FB_CONFIG.apiKey || FB_CONFIG.apiKey === 'PASTE_API_KEY') {
-    modal.style.display = 'none';
-    return;
-  }
 
   // Role selection buttons
   let selectedRole = sessionStorage.getItem('_role') || 'seeker';
@@ -334,6 +399,12 @@ export function initFirebase() {
 
   document.getElementById('pw-submit').addEventListener('click', submit);
   input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  document.getElementById('pw-solo').addEventListener('click', () => {
+    setRole('seeker');  // solo is for searching; hiding needs other players
+    modal.style.display = 'none';
+    applyRole('seeker');
+    fbReady = soloInit();
+  });
   setTimeout(() => input.focus(), 100);
 }
 
