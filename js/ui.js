@@ -9,6 +9,8 @@ import {
   undoZone, delZone,
 } from './zones.js';
 import { tpRenderConstraints } from './thermo.js';
+import { radarClearCenter } from './radar.js';
+import { mqReset } from './measure.js';
 import { bridge } from './bridge.js';
 
 // ── Sheet management ───────────────────────────────────────
@@ -17,6 +19,8 @@ const SHEET_IDS = ['mq-sheet', 'radar-sheet', 'thermo-panel', 'zone-panel', 'adm
 
 export function closeAllSheets() {
   cancelMapClickPos();
+  radarClearCenter();
+  mqReset();
   SHEET_IDS.forEach(id => document.getElementById(id).classList.remove('open'));
   document.querySelectorAll('[data-mode]').forEach(b => b.classList.remove('active'));
   document.getElementById('btn-mq').classList.remove('active');
@@ -101,21 +105,18 @@ export function initUI() {
     document.getElementById('btn-thermo').classList.remove('active');
     tp.open = false;
   });
-  ['thermo-panel', 'zone-panel'].forEach(id => {
-    document.getElementById(id).addEventListener('click', e => {
-      if (e.target === document.getElementById(id)) {
-        document.getElementById(id).classList.remove('open');
-        if (id === 'thermo-panel') {
-          document.getElementById('btn-thermo').classList.remove('active');
-          tp.open = false;
-        }
-      }
-    });
+  document.getElementById('thermo-panel').addEventListener('click', function (e) {
+    if (e.target !== this) return;
+    cancelMapClickPos();
+    this.classList.remove('open');
+    document.getElementById('btn-thermo').classList.remove('active');
+    tp.open = false;
   });
 
   // Radar close
   document.getElementById('btn-radar-close').addEventListener('click', () => {
     cancelMapClickPos();
+    radarClearCenter();
     document.getElementById('radar-sheet').classList.remove('open');
     document.querySelectorAll('[data-mode]').forEach(x => x.classList.remove('active'));
     st.mode = 'none';

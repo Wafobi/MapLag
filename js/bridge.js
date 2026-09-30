@@ -10,10 +10,7 @@ export const bridge = {
   fbDeleteZone: () => {},
   fbWriteThermo: () => {},
   fbDeleteThermo: () => {},
-  fbClearThermos: () => {},
 
   // Set by thermo.js, consumed by zones.js renderEliminatedArea
-  tpConstraintToElimCoords: () => ({}),
-  _mercClipT: () => [0, 0],
-  _fromMercY: y => y,
+  tpEliminatedPolygon: () => null,
 };

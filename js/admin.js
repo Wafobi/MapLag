@@ -3,18 +3,15 @@
 import { st, admin, tip } from './state.js';
 import { t } from './i18n.js';
 import { map, getMapLang } from './map.js';
-import { addZone } from './zones.js';
+import { addZone, WORLD_POLY, geomToLatLngs } from './zones.js';
 import { closeAllSheets } from './ui.js';
-
-const WORLD_POLY = turf.polygon([[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]]);
 
 export function adminInvertedLayer(geometry, style) {
   try {
     const feature = { type: 'Feature', geometry };
     const inverted = turf.difference(WORLD_POLY, feature);
     if (!inverted) return null;
-    const rings = inverted.geometry.coordinates.map(ring => ring.map(c => L.latLng(c[1], c[0])));
-    const layer = L.polygon(rings, style);
+    const layer = L.polygon(geomToLatLngs(inverted.geometry), style);
     layer._isInverted = true;
     layer._adminGeo = geometry;
     return layer;
@@ -52,6 +49,8 @@ export async function adminFetchBoundary(lat, lng) {
       const simplified = turf.simplify(turf.feature(geo), { tolerance: 0.005, highQuality: false });
       if (simplified && simplified.geometry) geo = simplified.geometry;
     } catch (e) {}
+    // Small places sometimes come back as a Point/LineString — not usable as an area
+    if (geo.type !== 'Polygon' && geo.type !== 'MultiPolygon') { tip(t('tip.noboundary')); document.getElementById('admin-loading').style.display = 'none'; return; }
     if (!geo.coordinates || !geo.coordinates.length) { tip(t('tip.boundaryerr')); document.getElementById('admin-loading').style.display = 'none'; return; }
 
     if (admin.previewLayer) { map.removeLayer(admin.previewLayer); }
@@ -87,7 +86,10 @@ async function adminConfirm(hit) {
     await addZone(s => {
       const inv = adminInvertedLayer(geometry, s);
       if (inv) return inv;
-      return adminPolyLayer(geometry, { ...s, color: '#3fbf6e', fillColor: '#3fbf6e' });
+      // Inversion failed: keep the raw area; renderEliminatedArea inverts via _adminGeo
+      const layer = adminPolyLayer(geometry, { ...s, color: '#3fbf6e', fillColor: '#3fbf6e' });
+      layer._isInverted = true;
+      return layer;
     }, label, { isInverted: true, isHit: true });
   } else {
     await addZone(s => adminPolyLayer(geometry, s), label, { isMiss: true });

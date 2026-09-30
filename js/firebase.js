@@ -21,16 +21,15 @@ const FB_CONFIG = {
 
 export { FB_CONFIG };
 
-const _roomParam = new URLSearchParams(location.search).get('room');
-export const FB_ROOM = _roomParam || Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(36).padStart(2, '0')).join('').slice(0, 12);
-if (!_roomParam) {
-  const u = new URL(location.href);
-  u.searchParams.set('room', FB_ROOM);
-  history.replaceState({}, '', u);
-}
+// Without ?room= everyone with the same password shares one map.
+// ?room=<name> gives a separate map under the same password.
+export const FB_ROOM = new URLSearchParams(location.search).get('room') || 'main';
+
+// Seeker positions older than this are treated as stale (tab closed without cleanup)
+export const LOCATION_TTL = 10 * 60 * 1000;
 
 export let fbDb = null;
-let fbReceiving = 0;
+export let fbReady = null;  // resolves once the key is derived and listeners are attached
 let fbPwHash = null;
 let _cryptoKey = null;
 
@@ -92,22 +91,38 @@ async function fbDecrypt(wrapper) {
 // ── CRUD ───────────────────────────────────────────────────
 
 const _writeTimers = {};
+const _writeTokens = {};
 const WRITE_DEBOUNCE = 150;
 
-export async function fbWriteZone(id, zoneData) {
-  if (!fbDb || fbReceiving) return;
-  const encrypted = await fbEncrypt(zoneData);
-  clearTimeout(_writeTimers['z_' + id]);
-  _writeTimers['z_' + id] = setTimeout(() => {
-    fbDb.ref(`${fbRoomPath()}/zones/${id}`).set(encrypted);
-    delete _writeTimers['z_' + id];
+// Debounced encrypted write. The token is claimed before encrypting, so a
+// delete (or newer write) issued while encryption is in flight wins.
+async function _queueWrite(key, path, data) {
+  const token = Symbol(key);
+  _writeTokens[key] = token;
+  clearTimeout(_writeTimers[key]);
+  const encrypted = await fbEncrypt(data);
+  if (_writeTokens[key] !== token) return;
+  _writeTimers[key] = setTimeout(() => {
+    delete _writeTimers[key];
+    delete _writeTokens[key];
+    fbDb.ref(path).set(encrypted);
   }, WRITE_DEBOUNCE);
 }
 
+function _cancelWrite(key) {
+  delete _writeTokens[key];
+  clearTimeout(_writeTimers[key]);
+  delete _writeTimers[key];
+}
+
+export function fbWriteZone(id, zoneData) {
+  if (!fbDb) return;
+  return _queueWrite('z_' + id, `${fbRoomPath()}/zones/${id}`, zoneData);
+}
+
 export function fbDeleteZone(id) {
-  if (!fbDb || fbReceiving) return;
-  clearTimeout(_writeTimers['z_' + id]);
-  delete _writeTimers['z_' + id];
+  if (!fbDb) return;
+  _cancelWrite('z_' + id);
   fbDb.ref(`${fbRoomPath()}/zones/${id}/deleted`).set(true);
 }
 
@@ -116,19 +131,15 @@ export function fbClearZones() {
   fbDb.ref(`${fbRoomPath()}/zones`).remove();
 }
 
-export async function fbWriteThermo(c) {
-  if (!fbDb || fbReceiving) return;
+export function fbWriteThermo(c) {
+  if (!fbDb) return;
   const { id, startPos, stopPos, warmer } = c;
-  const encrypted = await fbEncrypt({ id, startPos, stopPos, warmer });
-  clearTimeout(_writeTimers['t_' + id]);
-  _writeTimers['t_' + id] = setTimeout(() => {
-    fbDb.ref(`${fbRoomPath()}/thermos/${id}`).set(encrypted);
-    delete _writeTimers['t_' + id];
-  }, WRITE_DEBOUNCE);
+  return _queueWrite('t_' + id, `${fbRoomPath()}/thermos/${id}`, { id, startPos, stopPos, warmer });
 }
 
 export function fbDeleteThermo(id) {
-  if (!fbDb || fbReceiving) return;
+  if (!fbDb) return;
+  _cancelWrite('t_' + id);
   fbDb.ref(`${fbRoomPath()}/thermos/${id}/deleted`).set(true);
 }
 
@@ -141,6 +152,13 @@ export function fbClearThermos() {
 
 function _fbApplyZone(id, zd) {
   if (!zd) return;
+  // Bare {deleted:true}: deleted before its data was ever written. Drop the
+  // zone but keep any local undo entry (the deleting client still has the data).
+  if (!zd.geo) {
+    const i = st.zones.findIndex(z => z.id === id);
+    if (i >= 0) { map.removeLayer(st.zones[i].layer); st.zones.splice(i, 1); }
+    return;
+  }
   const idx = st.zones.findIndex(z => z.id === id);
   if (idx >= 0) { map.removeLayer(st.zones[idx].layer); st.zones.splice(idx, 1); }
   delete zoneHistory[id];
@@ -164,6 +182,7 @@ function _fbApplyThermo(id, c) {
   if (!c) return;
   const idx = tp.constraints.findIndex(x => x.id === id);
   if (idx >= 0) tp.constraints.splice(idx, 1);
+  if (!c.startPos || !c.stopPos) return;  // bare {deleted:true}, see _fbApplyZone
   delete thermoHistory[id];
   zoneOrderAdd(id);
 
@@ -192,10 +211,14 @@ function _fbScheduleRender() {
 // ── Seeker location broadcasting ──────────────────────────
 
 const _seekerMarkers = {};
+let _locDisconnectSet = false;
 
 export async function fbWriteLocation(lat, lng) {
   if (!fbDb || role !== 'seeker') return;
-  fbDb.ref(`${fbRoomPath()}/locations/${_devId}`).set(await fbEncrypt({ lat, lng, ts: Date.now() }));
+  const ref = fbDb.ref(`${fbRoomPath()}/locations/${_devId}`);
+  // beforeunload rarely fires on mobile — let the server remove our position
+  if (!_locDisconnectSet) { ref.onDisconnect().remove(); _locDisconnectSet = true; }
+  ref.set(await fbEncrypt({ lat, lng, ts: Date.now() }));
 }
 
 export function fbRemoveLocation() {
@@ -209,14 +232,25 @@ function _fbListenLocations() {
 
   ref.on('child_added', async snap => _upsertSeekerMarker(snap.key, await fbDecrypt(snap.val())));
   ref.on('child_changed', async snap => _upsertSeekerMarker(snap.key, await fbDecrypt(snap.val())));
-  ref.on('child_removed', snap => {
-    const m = _seekerMarkers[snap.key];
-    if (m) { map.removeLayer(m); delete _seekerMarkers[snap.key]; }
+  ref.on('child_removed', snap => _removeSeekerMarker(snap.key));
+  setInterval(_sweepStaleSeekers, 60 * 1000);
+}
+
+function _removeSeekerMarker(id) {
+  const m = _seekerMarkers[id];
+  if (m) { map.removeLayer(m); delete _seekerMarkers[id]; }
+}
+
+export function _sweepStaleSeekers() {
+  const now = Date.now();
+  Object.keys(_seekerMarkers).forEach(id => {
+    if (now - _seekerMarkers[id]._ts > LOCATION_TTL) _removeSeekerMarker(id);
   });
 }
 
 function _upsertSeekerMarker(id, data) {
-  if (!data || !data.lat || !data.lng) return;
+  if (!data || data.lat == null || data.lng == null) return;
+  if (!data.ts || Date.now() - data.ts > LOCATION_TTL) { _removeSeekerMarker(id); return; }
   if (_seekerMarkers[id]) {
     _seekerMarkers[id].setLatLng([data.lat, data.lng]);
   } else {
@@ -224,6 +258,7 @@ function _upsertSeekerMarker(id, data) {
       radius: 9, color: '#fff', fillColor: '#58a6ff', fillOpacity: 1, weight: 2.5
     }).bindTooltip('Seeker', { permanent: true, direction: 'top', className: 'seeker-tooltip' }).addTo(map);
   }
+  _seekerMarkers[id]._ts = data.ts;
 }
 
 function fbListen() {
@@ -233,37 +268,13 @@ function fbListen() {
   const zonesRef = fbDb.ref(`${fbRoomPath()}/zones`);
   const thermosRef = fbDb.ref(`${fbRoomPath()}/thermos`);
 
-  zonesRef.on('child_added', async snap => {
-    fbReceiving++;
-    try { _fbApplyZone(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); }
-    finally { fbReceiving--; }
-  });
-  zonesRef.on('child_changed', async snap => {
-    fbReceiving++;
-    try { _fbApplyZone(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); }
-    finally { fbReceiving--; }
-  });
-  zonesRef.on('child_removed', snap => {
-    fbReceiving++;
-    try { _fbRemoveZone(snap.key); _fbScheduleRender(); }
-    finally { fbReceiving--; }
-  });
+  zonesRef.on('child_added', async snap => { _fbApplyZone(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); });
+  zonesRef.on('child_changed', async snap => { _fbApplyZone(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); });
+  zonesRef.on('child_removed', snap => { _fbRemoveZone(snap.key); _fbScheduleRender(); });
 
-  thermosRef.on('child_added', async snap => {
-    fbReceiving++;
-    try { _fbApplyThermo(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); }
-    finally { fbReceiving--; }
-  });
-  thermosRef.on('child_changed', async snap => {
-    fbReceiving++;
-    try { _fbApplyThermo(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); }
-    finally { fbReceiving--; }
-  });
-  thermosRef.on('child_removed', snap => {
-    fbReceiving++;
-    try { _fbRemoveThermo(snap.key); _fbScheduleRender(); }
-    finally { fbReceiving--; }
-  });
+  thermosRef.on('child_added', async snap => { _fbApplyThermo(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); });
+  thermosRef.on('child_changed', async snap => { _fbApplyThermo(snap.key, await fbDecrypt(snap.val())); _fbScheduleRender(); });
+  thermosRef.on('child_removed', snap => { _fbRemoveThermo(snap.key); _fbScheduleRender(); });
 
   _fbListenLocations();
 }
@@ -287,7 +298,6 @@ export function initFirebase() {
   bridge.fbDeleteZone = fbDeleteZone;
   bridge.fbWriteThermo = fbWriteThermo;
   bridge.fbDeleteThermo = fbDeleteThermo;
-  bridge.fbClearThermos = fbClearThermos;
 
   // Password modal
   const modal = document.getElementById('pw-modal');
@@ -319,7 +329,7 @@ export function initFirebase() {
     setRole(selectedRole);
     modal.style.display = 'none';
     applyRole(selectedRole);
-    fbInit(hash, pw);
+    fbReady = fbInit(hash, pw);
   }
 
   document.getElementById('pw-submit').addEventListener('click', submit);

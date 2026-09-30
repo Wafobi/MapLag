@@ -34,19 +34,29 @@ export function setMissColorFull(c) {
   const picker = document.getElementById('miss-color-picker');
   if (picker) picker.value = c;
   updatePatternColors(c);
-  if (mergedMissLayer) mergedMissLayer.setStyle({ color: c });
   st.zones.forEach(z => {
     if (z.layer && (z.layer._isMiss || z.layer._isInverted)) {
       z.layer.setStyle({ color: c, fillColor: c });
     }
   });
+  renderEliminatedArea();
 }
 
 // ── Shared Turf constants ─────────────────────────────────
 
-const WORLD_POLY = turf.polygon([[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]]);
+export const WORLD_POLY = turf.polygon([[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]]]);
 
 // ── Geometry helpers ───────────────────────────────────────
+
+// GeoJSON Polygon/MultiPolygon geometry → nested LatLng arrays for L.polygon
+export function geomToLatLngs(geom) {
+  const ring = r => r.map(c => L.latLng(c[1], c[0]));
+  return geom.type === 'MultiPolygon' ? geom.coordinates.map(p => p.map(ring)) : geom.coordinates.map(ring);
+}
+
+// Hit zones: invertedCircle/Poly and admin hits are all inverted; older data
+// may lack the _isHit flag, so treat any inverted zone as a hit.
+export function isHitLayer(layer) { return !!(layer && (layer._isHit || layer._isInverted)); }
 
 export function layerToTurf(layer) {
   try {
@@ -92,8 +102,7 @@ export function invertedPolyLayer(pts, style) {
     const inner = turf.polygon([coords]);
     const inverted = turf.difference(WORLD_POLY, inner);
     if (!inverted) return null;
-    const rings = inverted.geometry.coordinates.map(ring => ring.map(c => L.latLng(c[1], c[0])));
-    const layer = L.polygon(rings, style);
+    const layer = L.polygon(geomToLatLngs(inverted.geometry), style);
     layer._isInverted = true;
     layer._origLatLngs = pts.map(p => [p.lat, p.lng]);
     return layer;
@@ -103,15 +112,17 @@ export function invertedPolyLayer(pts, style) {
 export function invertedCircleLayer(lat, lng, radiusM, style) {
   const steps = 64;
   const radiusKm = radiusM / 1000;
-  const innerCircle = turf.circle([lng, lat], radiusKm, { steps, units: 'kilometers' });
-  const inverted = turf.difference(WORLD_POLY, innerCircle);
+  let inverted = null;
+  try {
+    const innerCircle = turf.circle([lng, lat], radiusKm, { steps, units: 'kilometers' });
+    inverted = turf.difference(WORLD_POLY, innerCircle);
+  } catch (e) { console.warn('invertedCircleLayer:', e); }
   if (!inverted) {
     const fb = L.circle([lat, lng], { radius: radiusM, ...style });
     fb._isInverted = true; fb._origLat = lat; fb._origLng = lng; fb._origRadius = radiusM;
     return fb;
   }
-  const rings = inverted.geometry.coordinates.map(ring => ring.map(c => L.latLng(c[1], c[0])));
-  const layer = L.polygon(rings, style);
+  const layer = L.polygon(geomToLatLngs(inverted.geometry), style);
   layer._isInverted = true;
   layer._origLat = lat; layer._origLng = lng; layer._origRadius = radiusM;
   return layer;
@@ -127,18 +138,18 @@ export function renderEliminatedArea() {
 
   [...missZones, ...invertedZones].forEach(z => { if (map.hasLayer(z.layer)) map.removeLayer(z.layer); });
 
-  const { tpConstraintToElimCoords, _mercClipT, _fromMercY } = bridge;
-
   const activeThermo = tp.constraints.filter(c => c.startPos && c.stopPos);
   if (!missZones.length && !invertedZones.length && !activeThermo.length) return;
 
   try {
-    let hitUnion = null;
+    // Hits AND together; disjoint hits mean no location is possible at all.
+    let hitArea = null, hitContradiction = false;
     for (const z of invertedZones) {
       const hit = getHitAreaFeature(z.layer);
       if (!hit) continue;
-      if (!hitUnion) hitUnion = hit;
-      else hitUnion = turf.intersect(hitUnion, hit) || hitUnion;
+      if (!hitArea) { hitArea = hit; continue; }
+      hitArea = turf.intersect(hitArea, hit);
+      if (!hitArea) { hitContradiction = true; break; }
     }
 
     let missUnion = null;
@@ -149,27 +160,16 @@ export function renderEliminatedArea() {
     }
 
     for (const c of activeThermo) {
-      try {
-        const { mMidX, mMidY, mDirX, mDirY, eDirX, eDirY } = tpConstraintToElimCoords(c);
-        const depth = 200, steps = 64;
-        const [tMin, tMax] = _mercClipT(mMidX, mMidY, mDirX, mDirY);
-        const bisEdge = [];
-        for (let i = 0; i <= steps; i++) {
-          const t = tMin + (i / steps) * (tMax - tMin);
-          bisEdge.push([mMidX + mDirX * t, mMidY + mDirY * t]);
-        }
-        const farEdge = bisEdge.map(([mx, my]) => [mx + eDirX * depth, my + eDirY * depth]).reverse();
-        const ring = [...bisEdge, ...farEdge].map(([mx, my]) => [mx, _fromMercY(my)]);
-        ring.push(ring[0]);
-        const feat = turf.polygon([ring]);
-        missUnion = missUnion ? turf.union(missUnion, feat) : feat;
-      } catch (e) {}
+      const feat = bridge.tpEliminatedPolygon(c);
+      if (feat) missUnion = missUnion ? turf.union(missUnion, feat) : feat;
     }
 
     let eliminated;
-    if (hitUnion) {
-      let remaining = missUnion ? (turf.difference(hitUnion, missUnion) || null) : hitUnion;
-      eliminated = remaining ? (turf.difference(WORLD_POLY, remaining) || null) : world;
+    if (hitContradiction) {
+      eliminated = WORLD_POLY;
+    } else if (hitArea) {
+      const remaining = missUnion ? (turf.difference(hitArea, missUnion) || null) : hitArea;
+      eliminated = remaining ? (turf.difference(WORLD_POLY, remaining) || null) : WORLD_POLY;
     } else {
       eliminated = missUnion;
     }
@@ -291,7 +291,7 @@ export function deserializeZone(id, data) {
     layer = L.polygon([], s);
     layer._adminGeo = data.geo.geometry;
     if (data.isMiss) layer._isMiss = true;
-    if (data.isHit) layer._isHit = true;
+    if (data.isHit) { layer._isHit = true; layer._isInverted = true; }
   } else if (data.isInverted && data.geo.type === 'poly-inv') {
     const pts = data.geo.latlngs.map(p => L.latLng(p[0], p[1]));
     layer = invertedPolyLayer(pts, style) || L.polygon(pts, style);
@@ -309,7 +309,8 @@ export function deserializeZone(id, data) {
     layer = L.polygon(data.geo.latlngs, style);
     layer._isMiss = true;
   }
-  if (data.isHit && !data.isInverted) layer.addTo(map);
+  if (data.isHit) layer._isHit = true;
+  if (layer._isHit && !layer._isInverted) layer.addTo(map);
   bindLayerEvents(layer);
   st.zones.push({ id, lbl: data.lbl, layer });
 }
@@ -353,16 +354,15 @@ export function renderZonePanel() {
     if (item.type === 'zone') {
       const z = item.data;
       if (item.deleted) {
-        const isHit = z.fbData && z.fbData.isHit;
+        const isHit = z.fbData && (z.fbData.isHit || z.fbData.isInverted);
         return `<div class="zp-item" style="opacity:0.45">
           <div class="zp-dot" style="background:${isHit ? 'var(--green)' : 'var(--red)'}"></div>
           <div class="zp-name" style="text-decoration:line-through">${esc(z.lbl)}</div>
           <button class="zp-undo" data-id="${esc(z.id)}">${t('zone.undo')}</button>
         </div>`;
       } else {
-        const isMiss = z.layer && !z.layer._isHit && (z.layer._isMiss || z.layer._isInverted);
         return `<div class="zp-item">
-          <div class="zp-dot" style="background:${isMiss ? 'var(--red)' : 'var(--green)'}"></div>
+          <div class="zp-dot" style="background:${isHitLayer(z.layer) ? 'var(--green)' : 'var(--red)'}"></div>
           <div class="zp-name">${esc(z.lbl)}</div>
           <button class="zp-del" data-id="${esc(z.id)}">${t('zone.del')}</button>
         </div>`;

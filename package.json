@@ -1,0 +1,14 @@
+{
+  "name": "maplag",
+  "private": true,
+  "type": "module",
+  "description": "MapLag — Hide & Seek Map. The app itself has no build step; this file only drives the test bench.",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 tests/"
+  },
+  "devDependencies": {
+    "@turf/turf": "6.5.0",
+    "jsdom": "^26.1.0",
+    "leaflet": "1.9.4"
+  }
+}

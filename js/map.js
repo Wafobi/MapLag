@@ -69,7 +69,10 @@ export function loadTiles(idx) {
   if (currentTile) map.removeLayer(currentTile);
   const p = providers[idx];
   currentTile = L.tileLayer(p.url, p.opts).addTo(map);
+  // Fall back to the next provider only after 3 errors in a row,
+  // not after 3 sporadic failures over the whole session
   let errorCount = 0;
+  currentTile.on('tileload', () => { errorCount = 0; });
   currentTile.on('tileerror', function () {
     errorCount++;
     if (errorCount >= 3) { errorCount = 0; loadTiles(idx + 1); }

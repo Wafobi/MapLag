@@ -22,6 +22,16 @@ function _mqStopPolling() {
 
 export function mqStopPolling() { _mqStopPolling(); }
 
+// Drop the reference point and its marker (called when the sheet closes)
+export function mqReset() {
+  _mqStopPolling();
+  mq.refLat = null; mq.refLng = null; mq.refName = null; mq.radius = null;
+  if (mq.refMarker) { map.removeLayer(mq.refMarker); mq.refMarker = null; }
+  document.getElementById('mq-selected').style.display = 'none';
+  document.getElementById('btn-mq-closer').style.opacity = '0.4';
+  document.getElementById('btn-mq-further').style.opacity = '0.4';
+}
+
 export function mqOpen() {
   closeAllSheets();
   document.getElementById('mq-sheet').classList.add('open');
@@ -61,7 +71,7 @@ export function mqSelectRef(lat, lng, name) {
 }
 
 function mqRecalc() {
-  if (mq.myLat && mq.refLat) {
+  if (mq.myLat != null && mq.refLat != null) {
     mq.radius = haversine(mq.myLat, mq.myLng, mq.refLat, mq.refLng);
     document.getElementById('mq-selected-dist').textContent = t('mq.distfrom', toDisplay(mq.radius));
     document.getElementById('btn-mq-closer').style.opacity = '1';
@@ -70,8 +80,8 @@ function mqRecalc() {
 }
 
 async function mqDraw(closer) {
-  if (!mq.refLat || !mq.radius) { tip(t('tip.notapgoal')); return; }
-  const label = (closer ? '✓ Closer' : '✗ Further') + ' — ' + mq.refName + ' (' + toDisplay(mq.radius) + ')';
+  if (mq.refLat == null || !mq.radius) { tip(t('tip.notapgoal')); return; }
+  const label = t(closer ? 'mq.closer' : 'mq.further') + ' — ' + mq.refName + ' (' + toDisplay(mq.radius) + ')';
   const refLat = mq.refLat, refLng = mq.refLng, radius = mq.radius;
 
   document.getElementById('mq-selected').style.display = 'none';
@@ -82,7 +92,7 @@ async function mqDraw(closer) {
   mqUpdateMyPos();
 
   if (closer) {
-    await addZone(s => invertedCircleLayer(refLat, refLng, radius, s), label, { isInverted: true });
+    await addZone(s => invertedCircleLayer(refLat, refLng, radius, s), label, { isInverted: true, isHit: true });
   } else {
     await addZone(s => L.circle([refLat, refLng], { radius, ...s }), label, { isMiss: true });
   }
@@ -92,12 +102,15 @@ export function initMeasure() {
   document.getElementById('btn-mq').addEventListener('click', () => {
     const isOpen = document.getElementById('mq-sheet').classList.contains('open');
     if (!isOpen) { mqOpen(); } else {
+      cancelMapClickPos();
+      mqReset();
       document.getElementById('mq-sheet').classList.remove('open');
       document.getElementById('btn-mq').classList.remove('active');
     }
   });
   document.getElementById('btn-mq-close').addEventListener('click', () => {
     cancelMapClickPos();
+    mqReset();
     document.getElementById('mq-sheet').classList.remove('open');
     document.getElementById('btn-mq').classList.remove('active');
   });

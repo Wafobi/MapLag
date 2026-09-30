@@ -5,7 +5,7 @@ import { st, tp, T, cancelMapClickPos, mq, consumeMapClickCallback, tip, _devId 
 import { t, uiLang, applyLang, setUiLang } from './i18n.js';
 import { map, locationMarker, startLocation, locationWatch } from './map.js';
 import { initUI, closeAllSheets } from './ui.js';
-import { initRadar } from './radar.js';
+import { initRadar, radarSetCenter, radarClearCenter } from './radar.js';
 import { initThermo } from './thermo.js';
 import { initMeasure, mqSelectRef, mqStopPolling } from './measure.js';
 import { initSearch } from './search.js';
@@ -31,7 +31,7 @@ document.querySelectorAll('[data-mode]').forEach(b => {
     if (st.mode === clicked) {
       st.mode = 'none';
       document.querySelectorAll('[data-mode]').forEach(x => x.classList.remove('active'));
-      map.dragging.enable();
+      radarClearCenter();
       document.getElementById('radar-sheet').classList.remove('open');
       return;
     }
@@ -61,7 +61,7 @@ map.on('click', async (e) => {
     await adminFetchBoundary(e.latlng.lat, e.latlng.lng);
     return;
   }
-  if (st.mode !== 'circ') return;
+  if (st.mode === 'circ') radarSetCenter(e.latlng.lat, e.latlng.lng);
 });
 
 // ── Thermo toggle ─────────────────────────────────────────
